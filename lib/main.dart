@@ -1,4 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:mqtt_client/mqtt_client.dart';
+import 'package:mqtt_client/mqtt_server_client.dart';
 
 void main() {
   runApp(const MyApp());
@@ -49,6 +53,7 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   int _counter = 0;
+  late MqttServerClient client;
 
   void _incrementCounter() {
     setState(() {
@@ -59,6 +64,126 @@ class _MyHomePageState extends State<MyHomePage> {
       // called again, and so nothing would appear to happen.
       _counter++;
     });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    connect();
+  }
+
+  onConnected() {
+    print(
+        'MQTT::OnConnected client callback - Client connection was successful');
+  }
+
+  onDisconnected() {
+    print('MQTT::OnDisconnected client callback - Client disconnection');
+    if (client.connectionStatus!.disconnectionOrigin ==
+        MqttDisconnectionOrigin.solicited) {
+      print('MQTT::OnDisconnected callback is solicited, this is correct');
+    } else {
+      print(
+          'MQTT::OnDisconnected callback is unsolicited or none, this is incorrect - exiting');
+    }
+  }
+
+  onSubscribed(String topic) {
+    print('MQTT::onSubscribed topic $topic');
+  }
+
+  onSubscribeFail(String topic) {
+    print('MQTT::onSubscribeFail topic $topic');
+  }
+
+  onUnsubscribed(String? topic) {
+    print('MQTT::onUnsubscribed topic $topic');
+  }
+
+  connect() async {
+    String username = '70155dfbfd6143a895964cbb1f1c8ba9';
+    String password = '30bb43898-4a43-4561-b92a-bbf12ffb9408';
+    String clientId =
+        'App.AwfFACuQ0mXKhHUriqHKn-70155dfbfd6143a895964cbb1f1c8ba9';
+    String server = 'wss://test-azuremqtt.arnoo.com/mqtt';
+    client = MqttServerClient(server, clientId);
+    client.useWebSocket = true;
+    client.port = 8443; // ws: 8043, wss: 8443, tcp: 1883, tls: 8883
+    client.logging(on: true);
+    client.setProtocolV311();
+    client.keepAlivePeriod = 60; // 心跳间隔, 秒
+    client.connectTimeoutPeriod = 10000; // 连接超时，毫秒
+    client.onDisconnected = onDisconnected;
+    client.onConnected = onConnected;
+    client.onSubscribed = onSubscribed;
+    client.onSubscribeFail = onSubscribeFail;
+    client.onUnsubscribed = onUnsubscribed;
+    client.connectionMessage = MqttConnectMessage()
+        .withClientIdentifier(clientId)
+        .withWillTopic('iot/v1/cb/$username/user/disconnect')
+        .withWillMessage(
+            '{"service":"user","method":"disconnect","srcAddr":"0.$username","payload":{"timestamp":${DateTime.now().millisecondsSinceEpoch}}}')
+        .withWillQos(MqttQos.atLeastOnce)
+        .startClean(); // Non persistent session for testing
+    try {
+      await client.connect(username, password);
+    } on NoConnectionException catch (e) {
+      // Raised by the client when connection fails.
+      print('MQTT::client exception - $e');
+      client.disconnect();
+      return;
+    } on SocketException catch (e) {
+      // Raised by the socket layer
+      print('MQTT::socket exception - $e');
+      client.disconnect();
+      return;
+    } catch (e) {
+      print('MQTT::catch exception - $e');
+      client.disconnect();
+      return;
+    }
+
+    /// Check we are connected
+    if (client.connectionStatus!.state == MqttConnectionState.connected) {
+      print('MQTT::client connected');
+    } else {
+      /// Use status here rather than state if you also want the broker return code.
+      print(
+          'MQTT::client connection failed - disconnecting, status is ${client.connectionStatus}');
+      client.disconnect();
+      return;
+    }
+
+    client.updates!.listen((List<MqttReceivedMessage<MqttMessage?>>? c) {
+      final recMess = c![0].payload as MqttPublishMessage;
+      final pt =
+          MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
+
+      /// The above may seem a little convoluted for users only interested in the
+      /// payload, some users however may be interested in the received publish message,
+      /// lets not constrain ourselves yet until the package has been in the wild
+      /// for a while.
+      /// The payload is a byte buffer, this will be specific to the topic
+      print(
+          'MQTT::Change notification:: topic is <${c[0].topic}>, payload is <-- $pt -->');
+      print('');
+    });
+
+    client.published!.listen((MqttPublishMessage message) {
+      print(
+          'MQTT::Published notification:: topic is ${message.variableHeader!.topicName}, with Qos ${message.header!.qos}');
+    });
+
+    // 发布用户上线消息
+    String pubTopic = 'iot/v1/cb/$username/user/connect';
+    final builder = MqttClientPayloadBuilder();
+    builder.addString(
+        '{"service":"user","method":"connect","payload":{"timestamp":${DateTime.now().millisecondsSinceEpoch}}}');
+    client.publishMessage(pubTopic, MqttQos.atLeastOnce, builder.payload!);
+
+    // 监听用户相关消息
+    String subTopic = 'iot/v1/c/$username/#';
+    client.subscribe(subTopic, MqttQos.atLeastOnce);
   }
 
   @override
